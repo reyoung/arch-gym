@@ -31,7 +31,7 @@ python3 scripts/gym.py --player PLAYER select
 
 ## 开始或续玩
 
-1. 阅读 [游戏规则](references/game-rules.md) 和 [难度策略](references/difficulty-policy.md)。读取 profile、resume；有未结束局则优先恢复，不另开一局。
+1. 阅读 [游戏规则](references/game-rules.md) 和 [难度策略](references/difficulty-policy.md)。读取 profile、resume；有未结束局则优先恢复。若 `review_status: pending`，resume 返回复盘；先处理评价复核，再 select/start，新局不能绕过待处理复核。
 2. 新玩家只询问影响下一步的背景：熟悉的语言/领域与希望的挑战程度。没有偏好默认 L1；资深玩家可按自述设置起点：`gym.py --player PLAYER set-level 3`。这不是能力评分。
 3. 执行 select；默认排除所有已暴露案例/同一原始决策及最近三局的同类设计冲突。`needs_case` 是正常输出。
 4. 需要新题时，将 select 的去重约束、目标难度、熟悉领域和训练目标交给隔离 Builder；让它读取 [构建规范](references/case-builder.md)、[来源发现](references/source-discovery.md)、[数据格式](references/case-schema.md)。**不预装固定题库**：运行时检索高 star、awesome 收录项目，按证据质量与学习适配筛选，再缓存成题。
@@ -42,20 +42,38 @@ python3 scripts/gym.py --player PLAYER select
 
 - 自由回答优先，不强制多选，不提前展示参考设计。
 - 用 `event answer --text '玩家的实际设计回答'` 保存设计答案；不要把自己的推测记作玩家发言。长文本可由 Python 调用参数列表，避免 shell 插值。
-- 术语或背景提问记为 `event knowledge-question --text '…'`；回答记为 `event explanation --text '…'`。解释已知背景，不能泄露后续事件；这不算答题，也不扣分。
-- 透露解题方向的帮助必须记为 `event hint --text '…'`，不能伪装成背景解释。
+- 仅玩家确实不理解概念时记 `event knowledge-question --text '…'`。确认接口契约、失败语义、约束范围或题面歧义记 `event clarification --text '…'`，不计知识障碍；解释记为 `event explanation --text '…'`。解释已知背景，不能泄露后续事件；这不算答题，也不扣分。
+- 透露解题方向的帮助必须记为 `event hint --text '…'`，不能伪装成背景解释。中性追问不是提示，不把追问前已有的独立判断改标为受助。
+- 按内容判断推理，不按篇幅；简洁且足以支持结论的回答可获充分认可。仅在存在可信竞争目标时讨论合理备选，不机械要求每轮列出另一方案；没有实际竞争者时讨论当前设计的边界、代价或验证即可。
 - 玩家质疑题目假设时，记 `event challenge --text '…'`；如果包含设计判断，再单独记 answer。接受合理反例，纠正场景假设或评价。
 - 有设计回答且本轮讨论结束后调用 `next`。不要因为玩家问了一个概念就推进轮次。`ready_to_finish` 时必须复盘，不能自行追加挑战。
 - 续玩调用 `resume`。仅当前轮与已记录互动可见；不要读取原始 state 文件来恢复。
 
 ## 调整与结束
 
-- 第一次知识障碍：简释；第二次：最小例子；三次仍无法进入设计讨论：建议同目标的简化题。工具会输出 `switch_suggested`，这只是建议，需结合对话判断。取得玩家同意后，用 `finish --reason switched` 结束旧局，简短复盘，再用 `select --level N` 或 Builder 创建简化题。保留训练目标，降低领域门槛；不因此降低长期能力等级。
-- 快速解决就提前复盘，升级放到下一局。长期自动升级需要至少两局不同冲突的独立表现；见难度策略。
-- 用户说结束、已经理解或不想继续，立即 `finish --reason stopped`，用几句话复盘，不再追问。
-- 发现历史证据缺失，停止历史推进；`finish --reason evidence-gap` 后，只揭示已核实内容。未证实结局标为未知。经用户同意可以另开明确标注的模拟题，不在历史局中偷偷混入虚构事件。
-- 正常结束前阅读 [评价标准](references/evaluation-rubric.md)，依据可见回答写 assessment JSON，然后执行 `finish --assessment /path/to/assessment.json --reason completed`。可提前结束，不必耗尽轮次。
-- 最终命令才揭示来源与参考方案。复盘比较玩家方案、真实/参考选择及各自代价；与历史不同不判错，不按模式数量、代码行数或术语熟练程度计分。观察不足填 null，不捏造精确评分。
-- 缺少评价文件时仍能结束，工具记录未观察的维度，不制造成绩。只针对有证据的维度给出反馈和下一次练习建议。
+- 第一次知识障碍：简释；第二次：最小例子；三次仍无法进入设计讨论：建议同目标的简化题。`switch_suggested` 只是建议，结合概念理解与实际设计表现判断，不能把契约澄清累计为知识障碍。取得玩家同意后，用 `finish --reason switched` 结束旧局，简短复盘；switched 直接定案，再用 `select --level N` 或 Builder 创建简化题。保留训练目标，降低领域门槛；不因此降低长期能力等级。
+- 快速解决、题目明显过易或已无真实取舍时提前复盘，不凑轮数；改善下一题的竞争目标。长期自动升级需要至少两局不同冲突的已复核独立表现；见难度策略。
+- 用户说结束、已经理解或不想继续，立即 `finish --reason stopped`，用几句话复盘，不再追问；stopped 直接定案，不强迫认可评价。
+- 发现历史证据缺失，停止历史推进；`finish --reason evidence-gap` 后，只揭示已核实内容。未证实结局标为未知。evidence-gap 直接定案，经用户同意可以另开明确标注的模拟题，不在历史局中偷偷混入虚构事件。
+- 正常结束前阅读 [评价标准](references/evaluation-rubric.md)，依据可见回答写完整 assessment JSON，然后执行 `finish --assessment /path/to/assessment.json --reason completed`。仅 `finish --reason completed` 在结束轮次、揭示来源与参考方案后保存初评为 `review_status: pending`；初评在复核解决前不进入长期画像或自动升级。缺少评价文件仍可结束，未观察维度为 null。
+- 复盘比较玩家方案、真实/参考选择及有意义的代价；与历史不同不判错，不按选项数量、篇幅或术语熟练程度计分。正常复盘末尾问：“哪些评价你不同意，或有哪些取舍我漏看了？也可直接结束。”用户已要求停止时不追加提问。
+
+## 评价复核与教学改进
+
+从本 Skill 目录执行；纠正较早对局，尤其已经开了新局时，必须显式给出该局 `--session-id ID`：
+
+```sh
+python3 scripts/gym.py --player PLAYER review [--session-id ID]
+python3 scripts/gym.py --player PLAYER rebuttal --text TEXT [--session-id ID]
+python3 scripts/gym.py --player PLAYER resolve-review --disposition upheld|revised|uncertain|accepted|skipped --reason TEXT [--assessment PATH] [--session-id ID]
+```
+
+以上方括号和竖线表示可选项与枚举，执行时替换为实际参数。review 展示复盘、当前评价、事件与修订历史；rebuttal 保存玩家原话，已定案对局会重新进入待复核。resolve-review 保存原评价审计并解决复核；`revised` 与 `uncertain` 必须提供包含全部六维的完整替换评价，不能只交修改片段。细则见评价标准。
+
+Coach 按原始约束和事件判断：接受有效反驳，部分成立则分别处理，错误反驳用具体证据说明，不自动附和、不添加事后条件，未知就明确未知。无需玩家额外批准即可反思或提出不同意见。通常 1–2 次往返即可；用户停止或要求下一局时，明确认可才记 accepted，否则 skipped，说明未决争议，不把退出当认输。待复核期间 resume 返回复盘，select/start 必须等 resolve-review 后再用。
+
+纠正对原独立回答的误读可以继续引用原事件；依赖揭晓后的 rebuttal 新增论证时标 `evidence_phase: post-review`，不能算自动升级或独立画像证据。中性追问不改变原回答的帮助程度，实际提示必须留痕。
+
+用真实对局反馈改进教学：核对原题约束、事件、初评及反驳，区分评分错误、题目质量与概念缺口，提出可复用的问题和修正规则。未核实的抱怨不触发自动自改技能；仅在用户授权范围内落地文档或案例流程改进，并保留仍不确定之处。
 
 按玩家语言主持（中文或英文），必要时翻译案例叙述并保留代码/API 标识。认可推理，不对每个答案过度赞美。训练成功的证据是玩家越来越早发现问题、解释演进成本和技术取舍。

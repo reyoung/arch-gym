@@ -193,6 +193,10 @@ def storage(args):
     try:
         state = read_json(path) if path.exists() else fresh()
         require(state.get('version') == 1, 'unsupported state version')
+        profile = state['profile']
+        if 'level_baseline' not in profile:
+            profile['level_baseline'] = profile['current_level']
+            profile['level_baseline_history_count'] = len(state['history'])
         yield state
         fd, temp = tempfile.mkstemp(prefix='.' + args.player, dir=base)
         try:
@@ -267,6 +271,7 @@ def view(active):
 
 def start(case, state, review=False):
     require(state['active'] is None, 'Resume or finish the active session before starting another')
+    require(pending_review(state) is None, 'Resolve or skip the pending review before starting another')
     dup = duplicate_info(case, state)
     require(review or not (dup['exact'] or dup['semantic_proxy']), 'Duplicate/recent conflict: create another case or get agreement for --allow-review')
     active = {'session_id': uuid.uuid4().hex, 'case_id': case['id'], 'source_key': source_key(case),
@@ -314,13 +319,15 @@ def assessment(data, active):
         require(item.get('assistance') in ('independent', 'light', 'repeated', 'unobserved'), 'assistance required')
         require(isinstance(item.get('reason'), str) and bool(item['reason'].strip()), 'behavioral reason required')
         ids = item.get('event_ids')
-        require(isinstance(ids, list), 'event_ids required')
+        require(isinstance(ids, list) and all(type(i) is int for i in ids), 'event_ids must be integer array')
         events = [e for e in active['events'] if e['id'] in ids]
         require(len(events) == len(set(ids)), 'unknown event id')
+        post_review = any(e['kind'] == 'rebuttal' or e.get('phase') in ('post-review', 'debrief-correction') for e in events)
+        item['evidence_phase'] = 'post-review' if post_review else 'in-game'
         if score is not None:
-            require(any(e['kind'] == 'answer' for e in events), 'score needs a recorded design answer')
+            require(any(e['kind'] in ('answer', 'rebuttal') for e in events), 'score needs a recorded design answer or rebuttal')
             require(item['assistance'] != 'unobserved', 'unobserved dimension must have null score')
-            if item['assistance'] == 'independent':
+            if item['assistance'] == 'independent' and not post_review:
                 answer_ids = [e['id'] for e in events if e['kind'] == 'answer']
                 require(not any(h < max(answer_ids) for h in active['used_hints']), 'independence contradicted by earlier design hint; assess conservatively')
     require(isinstance(data.get('summary'), str), 'assessment summary required')
@@ -329,8 +336,11 @@ def assessment(data, active):
 
 def update_profile(state):
     profile = state['profile']
-    completed = [h for h in state['history'] if h['completed']]
-    profile['completed_sessions'] = len(completed)
+    profile.setdefault('level_baseline', profile['current_level'])
+    profile.setdefault('level_baseline_history_count', 0)
+    completed = [h for h in state['history'] if h['completed'] and h.get('review_status', 'resolved') == 'resolved']
+    profile['completed_sessions'] = sum(h['completed'] for h in state['history'])
+    profile['reviewed_sessions'] = len(completed)
     profile['recent_case_ids'] = [h['case_id'] for h in state['history'][-20:]]
     profile['topic_exposure'] = {}
     profile['hint_dependency'] = {}
@@ -343,24 +353,32 @@ def update_profile(state):
         if h['practice_type'] == 'review':
             continue
         for dim, value in h['assessment']['dimensions'].items():
-            if value['score'] is not None and value['confidence'] != 'low':
+            if value['score'] is not None and value['confidence'] != 'low' and value.get('evidence_phase', 'in-game') == 'in-game':
                 observations[dim].append({'score': value['score'], 'assistance': value['assistance'], 'case_id': h['case_id']})
     profile['dimension_observations'] = observations
     profile['strengths'] = [d for d, values in observations.items() if len(values) >= 2 and sum(v['score'] for v in values) / len(values) >= 3]
     profile['weaknesses'] = [d for d, values in observations.items() if len(values) >= 2 and sum(v['score'] for v in values) / len(values) < 2]
-    recent = completed[-2:]
-    if len(recent) < 2 or len(completed) - profile['last_adjustment_at'] < 2:
-        return
-    if len({h['core_conflict'] for h in recent}) < 2 or any(h['practice_type'] != 'new' for h in recent):
-        return
+    profile['current_level'] = profile['level_baseline']
+    profile['last_adjustment_at'] = 0
+    eligible = [h for h in state['history'][profile['level_baseline_history_count']:]
+                if h['completed'] and h.get('review_status', 'resolved') == 'resolved']
     def strong(h):
-        values = [v for v in h['assessment']['dimensions'].values() if v['score'] is not None and v['confidence'] != 'low']
+        values = [v for v in h['assessment']['dimensions'].values()
+                  if v['score'] is not None and v['confidence'] != 'low'
+                  and v.get('evidence_phase', 'in-game') == 'in-game']
         return (h['difficulty'] >= profile['current_level'] and not h['used_hints'] and
                 len(values) >= 4 and all(v['score'] >= 3 and v['assistance'] == 'independent' for v in values))
-    if all(strong(h) for h in recent):
-        profile['current_level'] = min(5, profile['current_level'] + 1)
-        profile['last_adjustment_at'] = len(completed)
-    # Background confusion never lowers persistent ability. Consent-based switch uses an override.
+    for count in range(2, len(eligible) + 1):
+        recent = eligible[count-2:count]
+        if count - profile['last_adjustment_at'] < 2:
+            continue
+        if len({h['core_conflict'] for h in recent}) < 2 or any(h['practice_type'] != 'new' for h in recent):
+            continue
+        if all(strong(h) for h in recent):
+            profile['current_level'] = min(5, profile['current_level'] + 1)
+            profile['last_adjustment_at'] = count
+    # Recompute from baseline so corrections can retract unsupported promotions.
+    # Background confusion never lowers the baseline.
 
 
 def finish(state, data, reason):
@@ -373,13 +391,69 @@ def finish(state, data, reason):
     assessment(data, active)
     case = active['snapshot']
     active.update({'ended_at': now(), 'completed': reason == 'completed', 'end_reason': reason,
-                   'assessment': data, 'reference_revealed': True})
+                   'assessment': data, 'reference_revealed': True,
+                   'review_status': 'pending' if reason == 'completed' else 'resolved',
+                   'review_revisions': []})
     state['history'].append(active)
     state['active'] = None
     update_profile(state)
-    return {'status': 'finished', 'end_reason': reason, 'reference': case['reference'],
-            'source': case['source'], 'evidence': case['evidence'], 'assessment': data,
-            'profile': state['profile']}
+    return review_view(active, state)
+
+
+def pending_review(state):
+    return next((h for h in reversed(state['history']) if h.get('review_status') == 'pending'), None)
+
+
+def review_target(state, session_id=None):
+    if session_id:
+        target = next((h for h in state['history'] if h['session_id'] == session_id), None)
+    else:
+        require(state['active'] is None, 'Use --session-id to review an earlier session while a game is active')
+        target = pending_review(state) or (state['history'][-1] if state['history'] else None)
+    require(target is not None, 'Completed session not found')
+    return target
+
+
+def review_view(target, state):
+    case = target['snapshot']
+    return {'status': 'review_pending' if target.get('review_status') == 'pending' else 'finished',
+            'session_id': target['session_id'], 'end_reason': target['end_reason'],
+            'review_status': target.get('review_status', 'resolved'),
+            'reference': case['reference'], 'source': case['source'], 'evidence': case['evidence'],
+            'assessment': target['assessment'], 'events': target['events'],
+            'revisions': target.get('review_revisions', []), 'profile': state['profile']}
+
+
+def rebuttal(state, text, session_id=None):
+    require(isinstance(text, str) and bool(text.strip()), 'rebuttal text required')
+    target = review_target(state, session_id)
+    target['events'].append({'id': len(target['events']) + 1, 'round': target['round_index'] + 1,
+                             'kind': 'rebuttal', 'phase': 'post-review', 'text': text, 'at': now()})
+    target['review_status'] = 'pending'
+    update_profile(state)
+    return review_view(target, state)
+
+
+def resolve_review(state, disposition, reason, data=None, session_id=None):
+    target = review_target(state, session_id)
+    require(target.get('review_status') == 'pending', 'Review already resolved; record a rebuttal to reopen')
+    require(disposition in ('upheld', 'revised', 'uncertain', 'accepted', 'skipped'), 'invalid review disposition')
+    require(isinstance(reason, str) and bool(reason.strip()), 'review rationale required')
+    require((data is not None) == (disposition in ('revised', 'uncertain')),
+            'revised/uncertain require replacement assessment; other dispositions keep assessment')
+    if data is not None:
+        assessment(data, target)
+    import copy
+    previous = copy.deepcopy(target['assessment'])
+    if data is not None:
+        target['assessment'] = copy.deepcopy(data)
+    target.setdefault('review_revisions', []).append({
+        'at': now(), 'disposition': disposition, 'reason': reason,
+        'previous': previous, 'replacement': copy.deepcopy(target['assessment']),
+        'rebuttal_event_ids': [e['id'] for e in target['events'] if e['kind'] == 'rebuttal']})
+    target['review_status'] = 'resolved'
+    update_profile(state)
+    return review_view(target, state)
 
 
 def parser():
@@ -399,12 +473,21 @@ def parser():
     level_p = sub.add_parser('set-level')
     level_p.add_argument('level', type=int, choices=range(6))
     ev = sub.add_parser('event')
-    ev.add_argument('kind', choices=('answer', 'knowledge-question', 'explanation', 'hint', 'challenge', 'coach-note'))
+    ev.add_argument('kind', choices=('answer', 'clarification', 'knowledge-question', 'explanation', 'hint', 'challenge', 'coach-note'))
     ev.add_argument('--text', required=True)
     sub.add_parser('next')
     done = sub.add_parser('finish')
     done.add_argument('--assessment', help='JSON file using the documented rubric')
     done.add_argument('--reason', choices=('completed', 'stopped', 'switched', 'evidence-gap'), default='completed')
+    for name in ('review', 'rebuttal', 'resolve-review'):
+        review = sub.add_parser(name)
+        review.add_argument('--session-id')
+        if name == 'rebuttal':
+            review.add_argument('--text', required=True)
+        elif name == 'resolve-review':
+            review.add_argument('--disposition', required=True, choices=('upheld', 'revised', 'uncertain', 'accepted', 'skipped'))
+            review.add_argument('--reason', required=True)
+            review.add_argument('--assessment')
     dup = sub.add_parser('duplicates')
     dup.add_argument('case_id')
     check = sub.add_parser('validate')
@@ -424,14 +507,28 @@ def run(args):
         command = args.command
         if command == 'profile':
             return {'profile': state['profile'], 'active_session': state['active']['session_id'] if state['active'] else None}
+        if command == 'review':
+            return review_view(review_target(state, args.session_id), state)
+        if command == 'rebuttal':
+            return rebuttal(state, args.text, args.session_id)
+        if command == 'resolve-review':
+            data = read_json(args.assessment) if args.assessment else None
+            return resolve_review(state, args.disposition, args.reason, data, args.session_id)
         if command == 'set-level':
-            require(state['active'] is None, 'Set baseline between sessions')
+            require(state['active'] is None and pending_review(state) is None, 'Set baseline between resolved sessions')
             state['profile']['current_level'] = args.level
-            state['profile']['last_adjustment_at'] = state['profile']['completed_sessions']
+            state['profile']['level_baseline'] = args.level
+            state['profile']['level_baseline_history_count'] = len(state['history'])
+            state['profile']['last_adjustment_at'] = 0
             return {'profile': state['profile']}
         if command == 'resume':
-            return view(state['active']) if state['active'] else {'status': 'no_active_session'}
+            if state['active']:
+                return view(state['active'])
+            pending = pending_review(state)
+            return review_view(pending, state) if pending else {'status': 'no_active_session'}
         if command in ('select', 'start', 'duplicates'):
+            if command in ('select', 'start') and pending_review(state):
+                return {'status': 'review_required', 'session_id': pending_review(state)['session_id']}
             if command == 'select' and state['active']:
                 return {'status': 'resume_required', 'session_id': state['active']['session_id']}
             cases = catalog(args.cache_dir)

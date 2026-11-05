@@ -122,6 +122,7 @@ class GameTests(unittest.TestCase):
             gym.start(fixture(cid), state)
             gym.event(state['active'], 'answer', 'Explain design with constraints and costs')
             gym.finish(state, good_assessment(state['active']), 'completed')
+            gym.resolve_review(state, 'accepted', 'Player is done reviewing')
             self.assertEqual(state['profile']['current_level'], 3 if cid == 'one' else 4)
 
     def test_hint_cannot_be_scored_independent(self):

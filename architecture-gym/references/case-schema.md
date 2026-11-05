@@ -74,7 +74,7 @@
 `reference` 必须恰有：
 
 - `actual_decision: string`：历史案例如实区分讨论、提议、采纳和落地；模拟案例明确写“参考选项，并非真实历史决策或唯一答案”。
-- `alternatives: string[]`：多个在给定约束下可辩护的方案及适用条件。
+- `alternatives: string[]`：在给定约束下确实可辩护的备选及适用条件；没有有意义的竞争者时允许 `[]`，在 actual_decision 或 tradeoffs 说明边界与原因。不要求固定数量，不制造陪衬方案，也不要求每轮比较。
 - `tradeoffs: string[]`：具体收益、成本、风险及成立前提；不能以“与历史一致”代替论证。
 - `outcome: string`：模拟案例必须以“模拟情景，未观察真实生产结果。”开头，再给出可验证的预期或验收方式；历史案例区分已观察结果、作者陈述、推断与未知。
 - `evidence: string[]`：支撑最终决策及结果的证据 ID；模拟案例为 `[]`。
@@ -83,7 +83,9 @@
 
 ## 字段骨架：不是可玩案例
 
-以下仅展示模拟分支的字段位置。尖括号内容是占位符，不得加入案例缓存或当作验证通过的教学内容。真实生成时填入 3..5 个有实际内容的轮次；历史分支按上述规则更换来源、补证据和 `as_of`。
+以下仅展示模拟分支的字段位置。尖括号内容是占位符，不得加入案例缓存或当作验证通过的教学内容。真实生成时填入 3..5 个有实际内容的轮次；历史分支按上述规则更换来源、补证据和 `as_of`。示例 alternatives 为空表示允许没有可信竞争者；有实际备选时再填写，不按数量评价取舍质量。
+
+案例难度按实际竞争目标和推理负担确定，不以多列方案、增加术语或重复轮次凑难度。每轮按自然决策需要设计主问题，不强制方案比较；游戏可以在教学目标已达成或任务明显过易时提前结束。
 
 ```json
 {
@@ -118,7 +120,7 @@
   "evidence": [],
   "reference": {
     "actual_decision": "参考选项，并非真实历史决策或唯一答案：<条件与方案>",
-    "alternatives": ["<可辩护选项一>", "<可辩护选项二>"],
+    "alternatives": [],
     "tradeoffs": ["<具体取舍及前提>"],
     "outcome": "模拟情景，未观察真实生产结果。<预期验收方式>",
     "evidence": []
@@ -127,6 +129,18 @@
   "evaluation": {"rubric":"architecture-rubric-v1"}
 }
 ```
+
+## 会话与评价契约（不属于案例 JSON）
+
+以下是运行时会话行为，不向上述案例顶层增加字段：
+
+- `finish --reason completed` 结束轮次、揭示 reference、保存初评为 `review_status: pending`。stopped/switched/evidence-gap 直接定案，之后仍可通过 rebuttal 重开。
+- `gym.py review [--session-id ID]` 展示复盘、当前评价、事件与修订历史；session ID 只能用命名选项，不是位置参数。
+- `gym.py rebuttal --text TEXT [--session-id ID]` 记录原话，已定案会话重新待复核。纠正旧局尤其在新局开始后，必须显式给出旧局 ID。
+- `gym.py resolve-review --disposition upheld|revised|uncertain|accepted|skipped --reason TEXT [--assessment PATH] [--session-id ID]` 解决复核；执行时选择一个 disposition。revised/uncertain 必须提供包含全部六维的完整替换评价，保留先前评价作为审计；具体处置见 [评价标准](evaluation-rubric.md)。
+- pending 时 resume 返回复盘，select/start 要求先 resolve-review。profile 的 completed_sessions 可包含 pending 的 completed 对局，但能力观察和自动升级仅使用已定案、`evidence_phase: in-game` 且符合其他评分条件的证据。
+- 评价维度引用揭晓后的 rebuttal 事件须标 `evidence_phase: post-review`，不进入自动等级或独立画像证据。仅纠正对原回答的误读时可引用原 answer；不要把反驳写回为局内答案。
+- 契约、范围和题面歧义记 `event clarification`，不计 knowledge_questions；概念困惑才记 knowledge-question。真正的解题提示记 hint，中性追问不改变原回答的独立性。
 
 ## 验证边界
 
